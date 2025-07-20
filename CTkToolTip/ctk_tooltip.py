@@ -1,6 +1,6 @@
 """
 CTkToolTip Widget
-version: 0.8
+version: 0.9
 """
 
 import time
@@ -10,203 +10,232 @@ from tkinter import Toplevel, Frame
 
 
 class CTkToolTip(Toplevel):
-    """
-    Creates a ToolTip (pop-up) widget for customtkinter.
-    """
-
     def __init__(
-            self,
-            widget: any = None,
-            message: str = None,
-            delay: float = 0.2,
-            follow: bool = True,
-            x_offset: int = +20,
-            y_offset: int = +10,
-            bg_color: str = None,
-            corner_radius: int = 10,
-            border_width: int = 0,
-            border_color: str = None,
-            alpha: float = 0.95,
-            padding: tuple = (10, 2),
-            **message_kwargs):
-
+        self,
+        widget: any,
+        message: str = None,
+        delay: float = 0.2,
+        follow: bool = True,
+        x_offset: int = 0,
+        y_offset: int = 4,  # ← reduced from 10
+        container: any = None,
+        bg_color: str = None,
+        corner_radius: int = 10,
+        border_width: int = 0,
+        border_color: str = None,
+        alpha: float = 0.95,
+        padding: tuple = (10, 2),
+        **message_kwargs,
+    ):
         super().__init__()
-
         self.widget = widget
+        self.container = container or widget.master
 
-        self.withdraw()
-
-        # Disable ToolTip's title bar
-        self.overrideredirect(True)
-
-        if sys.platform.startswith("win"):
-            self.transparent_color = self.widget._apply_appearance_mode(
-                customtkinter.ThemeManager.theme["CTkToplevel"]["fg_color"])
-            self.attributes("-transparentcolor", self.transparent_color)
-            self.transient()
-        elif sys.platform.startswith("darwin"):
-            self.transparent_color = 'systemTransparent'
-            self.attributes("-transparent", True)
-            self.transient(self.master)
-        else:
-            self.transparent_color = '#000001'
-            corner_radius = 0
-            self.transient()
-
-        self.resizable(width=True, height=True)
-
-        # Make the background transparent
-        self.config(background=self.transparent_color)
-
-        # StringVar instance for msg string
-        self.messageVar = customtkinter.StringVar()
-        self.message = message
-        self.messageVar.set(self.message)
-
+        # state and scheduling
         self.delay = delay
         self.follow = follow
         self.x_offset = x_offset
         self.y_offset = y_offset
-        self.corner_radius = corner_radius
-        self.alpha = alpha
-        self.border_width = border_width
-        self.padding = padding
-        self.bg_color = customtkinter.ThemeManager.theme["CTkFrame"]["fg_color"] if bg_color is None else bg_color
-        self.border_color = border_color
+        self._after_id = None  # ← will hold the scheduled callback
         self.disable = False
-
-        # visibility status of the ToolTip inside|outside|visible
         self.status = "outside"
         self.last_moved = 0
-        self.attributes('-alpha', self.alpha)
 
+        # standard Toplevel setup
+        self.withdraw()
+        self.overrideredirect(True)
+        self.attributes("-alpha", alpha)
+        self._setup_transparency(bg_color, corner_radius)
+
+        # build UI
+        self._build_widgets(
+            message,
+            padding,
+            corner_radius,
+            border_width,
+            border_color,
+            **message_kwargs,
+        )
+
+        # bind events on widget + tooltip to avoid flicker
+        self._bind_events()
+
+    def _setup_transparency(self, bg_color, corner_radius):
+        # platform‐specific transparency logic
         if sys.platform.startswith("win"):
-            if self.widget._apply_appearance_mode(self.bg_color) == self.transparent_color:
-                self.transparent_color = "#000001"
-                self.config(background=self.transparent_color)
-                self.attributes("-transparentcolor", self.transparent_color)
+            tc = self.widget._apply_appearance_mode(
+                customtkinter.ThemeManager.theme["CTkToplevel"]["fg_color"]
+            )
+            self.transparent_color = tc
+            self.attributes("-transparentcolor", tc)
+            self.transient()
+        elif sys.platform.startswith("darwin"):
+            self.transparent_color = "systemTransparent"
+            self.attributes("-transparent", True)
+            self.transient(self.master)
+        else:
+            self.transparent_color = "#000001"
+            corner_radius = 0
+            self.transient()
 
-        # Add the message widget inside the tooltip
-        self.transparent_frame = Frame(self, bg=self.transparent_color)
-        self.transparent_frame.pack(padx=0, pady=0, fill="both", expand=True)
+        self.resizable(width=True, height=True)
+        self.config(background=self.transparent_color)
 
-        self.frame = customtkinter.CTkFrame(self.transparent_frame, bg_color=self.transparent_color,
-                                            corner_radius=self.corner_radius,
-                                            border_width=self.border_width, fg_color=self.bg_color,
-                                            border_color=self.border_color)
-        self.frame.pack(padx=0, pady=0, fill="both", expand=True)
+    def _build_widgets(
+        self,
+        message,
+        padding,
+        corner_radius,
+        border_width,
+        border_color,
+        **message_kwargs,
+    ):
+        self.messageVar = customtkinter.StringVar(value=message)
 
-        self.message_label = customtkinter.CTkLabel(self.frame, textvariable=self.messageVar, **message_kwargs)
-        self.message_label.pack(fill="both", padx=self.padding[0] + self.border_width,
-                                pady=self.padding[1] + self.border_width, expand=True)
+        # outer transparent frame
+        tf = Frame(self, bg=self.transparent_color)
+        tf.pack(fill="both", expand=True)
 
-        if self.widget.winfo_name() != "tk":
-            if self.frame.cget("fg_color") == self.widget.cget("bg_color"):
-                if not bg_color:
-                    self._top_fg_color = self.frame._apply_appearance_mode(
-                        customtkinter.ThemeManager.theme["CTkFrame"]["top_fg_color"])
-                    if self._top_fg_color != self.transparent_color:
-                        self.frame.configure(fg_color=self._top_fg_color)
+        # actual CTkFrame
+        fg = (
+            customtkinter.ThemeManager.theme["CTkFrame"]["fg_color"]
+            if border_color is None
+            else border_color
+        )
+        self.frame = customtkinter.CTkFrame(
+            tf,
+            bg_color=self.transparent_color,
+            corner_radius=corner_radius,
+            border_width=border_width,
+            fg_color=fg,
+        )
+        self.frame.pack(fill="both", expand=True)
 
-        # Add bindings to the widget without overriding the existing ones
-        self.widget.bind("<Enter>", self.on_enter, add="+")
-        self.widget.bind("<Leave>", self.on_leave, add="+")
-        self.widget.bind("<Motion>", self.on_enter, add="+")
-        self.widget.bind("<B1-Motion>", self.on_enter, add="+")
-        self.widget.bind("<Destroy>", lambda _: self.hide(), add="+")
+        # label
+        self.message_label = customtkinter.CTkLabel(
+            self.frame, textvariable=self.messageVar, **message_kwargs
+        )
+        self.message_label.pack(
+            fill="both",
+            padx=padding[0] + border_width,
+            pady=padding[1] + border_width,
+            expand=True,
+        )
 
-    def show(self) -> None:
-        """
-        Enable the widget.
-        """
-        self.disable = False
+    def _bind_events(self):
+        w = self.widget
+        w.bind("<Enter>", self.on_enter, add="+")
+        w.bind("<Motion>", self.on_enter, add="+")
+        w.bind("<Leave>", self.on_leave, add="+")
+        w.bind("<Destroy>", lambda _: self.hide(), add="+")
 
-    def on_enter(self, event) -> None:
-        """
-        Processes motion within the widget including entering and moving.
-        """
+        # keep pointer-over-tooltip from hiding it
+        self.bind("<Enter>", self._on_tooltip_enter)
+        self.bind("<Leave>", self._on_tooltip_leave)
+        self._pointer_over_tooltip = False
 
+    def on_enter(self, event):
         if self.disable:
             return
-        self.last_moved = time.time()
 
-        # Set the status as inside for the very first time
+        self.last_moved = time.time()
         if self.status == "outside":
             self.status = "inside"
 
-        # If the follow flag is not set, motion within the widget will make the ToolTip dissapear
         if not self.follow:
-            self.status = "inside"
             self.withdraw()
 
-        # Calculate available space on the right side of the widget relative to the screen
-        root_width = self.winfo_screenwidth()
-        widget_x = event.x_root
-        space_on_right = root_width - widget_x
+        # cancel any pending show
+        if self._after_id:
+            self.after_cancel(self._after_id)
+            self._after_id = None
 
-        # Calculate the width of the tooltip's text based on the length of the message string
-        text_width = self.message_label.winfo_reqwidth()
+        # measure container for clamping
+        c = self.container
+        c.update_idletasks()
+        left = c.winfo_rootx() + 4
+        right = c.winfo_rootx() + c.winfo_width() - 4
 
-        # Calculate the offset based on available space and text width to avoid going off-screen on the right side
-        offset_x = self.x_offset
-        if space_on_right < text_width + 20:  # Adjust the threshold as needed
-            offset_x = -text_width - 20  # Negative offset when space is limited on the right side
+        # measure tooltip size
+        self.message_label.update_idletasks()
+        tip_w = self.message_label.winfo_reqwidth()
+        tip_h = self.winfo_reqheight()
 
-        # Offsets the ToolTip using the coordinates od an event as an origin
-        self.geometry(f"+{event.x_root + offset_x}+{event.y_root + self.y_offset}")
+        # compute centered X + clamp
+        px = event.x_root + self.x_offset
+        desired_x = px - (tip_w // 2)
+        if desired_x < left:
+            x = left
+        elif desired_x + tip_w > right:
+            x = right - tip_w
+        else:
+            x = desired_x
 
-        # Time is in integer: milliseconds
-        self.after(int(self.delay * 1000), self._show)
+        # compute Y
+        py = event.y_root + self.y_offset
+        # if the tooltip would overlap pointer, flip above
+        if py <= event.y_root + tip_h:
+            y = event.y_root - tip_h - abs(self.y_offset)
+        else:
+            y = py
 
-    def on_leave(self, event=None) -> None:
-        """
-        Hides the ToolTip temporarily.
-        """
+        # move & schedule show
+        self.geometry(f"+{x}+{y}")
+        self._after_id = self.after(int(self.delay * 1000), self._show)
 
-        if self.disable: return
+    def _on_tooltip_enter(self, _e):
+        self._pointer_over_tooltip = True
+
+    def _on_tooltip_leave(self, _e):
+        self._pointer_over_tooltip = False
+        # if pointer is also outside widget, hide
+        self.on_leave()
+
+    def on_leave(self, event=None):
+        # don't hide if pointer just moved over tooltip
+        if self._pointer_over_tooltip:
+            return
+
+        # cancel pending show
+        if self._after_id:
+            self.after_cancel(self._after_id)
+            self._after_id = None
+
         self.status = "outside"
         self.withdraw()
 
-    def _show(self) -> None:
-        """
-        Displays the ToolTip.
-        """
-
+    def _show(self):
+        self._after_id = None
         if not self.widget.winfo_exists():
-            self.hide()
             self.destroy()
+            return
 
-        if self.status == "inside" and time.time() - self.last_moved >= self.delay:
+        # only show if still inside after the delay
+        if self.status == "inside" and (time.time() - self.last_moved) >= self.delay:
             self.status = "visible"
             self.deiconify()
 
-    def hide(self) -> None:
-        """
-        Disable the widget from appearing.
-        """
-        if not self.winfo_exists():
-            return
-        self.withdraw()
-        self.disable = True
+    def hide(self):
+        # cancel any leftover callback
+        if self._after_id:
+            self.after_cancel(self._after_id)
+            self._after_id = None
 
-    def is_disabled(self) -> None:
-        """
-        Return the window state
-        """
+        self.disable = True
+        self.withdraw()
+
+    def is_disabled(self):
         return self.disable
 
-    def get(self) -> None:
-        """
-        Returns the text on the tooltip.
-        """
+    def get(self):
         return self.messageVar.get()
 
-    def configure(self, message: str = None, delay: float = None, bg_color: str = None, **kwargs):
-        """
-        Set new message or configure the label parameters.
-        """
-        if delay: self.delay = delay
-        if bg_color: self.frame.configure(fg_color=bg_color)
-
-        self.messageVar.set(message)
-        self.message_label.configure(**kwargs)
+    def configure(self, message=None, delay=None, bg_color=None, **kwargs):
+        if delay is not None:
+            self.delay = delay
+        if bg_color is not None:
+            self.frame.configure(fg_color=bg_color)
+        if message is not None:
+            self.messageVar.set(message)
+        if kwargs:
+            self.message_label.configure(**kwargs)
